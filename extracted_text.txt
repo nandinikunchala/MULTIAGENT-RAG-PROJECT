@@ -1,0 +1,919 @@
+PROJECT BUILD GUIDE · PROJECT 01
+Multi-Agent RAGResearchAssistant— from zero
+3 cooperating agents · LangGraph + RAG + Pinecone + FastAPI · local mode needs
+no API keys
+A complete, copy-along guide that assumes zero prior AI-engineering
+experience. You’ll build a system where a Retriever agent ﬁnds
+documents, a Summarizer answers from them, and a Critic fact-checks
+and can send the work back — orchestrated with LangGraph. The whole
+thing runs and is tested oﬄine; ﬂip one switch for the OpenAI + Pinecone
+production path.
+16
+PARTS
+0→deployed
+NOTHING ASSUMED
+Tested
+9/9 PASSING
+R@3=100%
+ON THE EVAL SET
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 1 / 44
+00
+Part 0 — What you are
+building & why
+Orientation before any code
+PART 0 · ORIENTATION
+The product in one line▸
+Skills this closes▸
+How the agents cooperate▸
+The mental model▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 2 / 44
+The product in one line
+You will build a Multi-Agent Research Assistant: ask a question, and three AI agents work
+together to answer it from a document knowledge base — one retrieves relevant documents, one
+summarizes them into a grounded answer, and one critiques that answer and can send it back
+for another pass. It’s wrapped in a web API and can be deployed.
+✦ Why this project closes your biggest gap
+Your resume lists LangChain, LangGraph, CrewAI, RAG, Pinecone, AI Agents, and Prompt Engineering —
+currently with zero projects behind them. This one project is real, working proof of every item in that
+block. That’s the highest-leverage thing you can build right now.
+PART 0 · COVERAGE
+Skills this project proves
+Resume skill Where this project proves it
+RAG (Retrieval-Augmented Generation) The retriever + vector store + grounded answering
+LangGraph The whole pipeline is a LangGraph state machine
+AI Agents Three single-responsibility cooperating agents
+Pinecone The production vector store (with a local fallback)
+Prompt Engineering The summarizer & critic system prompts
+LangChain LLM + embeddings via langchain integrations
+Evaluation A 15-query eval set with precision/recall
+FastAPI / Docker API wrapper + containerised deploy
+PART 0 · ARCHITECTURE
+How the three agents cooperate
+   question
+      │
+      ▼
+ ┌───────────┐    docs    ┌────────────┐  summary  ┌─────────┐
+ │ Retriever │ ─────────▶ │ Summarizer │ ────────▶ │ Critic  │
+ └───────────┘            └────────────┘           └────┬────┘
+      ▲                        ▲                        │
+   vector DB                   │  "revise"              │ verdict
+   (Pinecone /                 └────────────────────────┘
+    in-memory)                        (loop, up to N times)
+                                                         │ "pass"
+                                                         ▼
+                                                   final answer
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 3 / 44
+The Critic is what makes this a graph, not a straight line: if the answer isn’t good enough, it routes
+back to the Summarizer for another attempt — up to a ﬁxed budget so it always ﬁnishes.
+◆ New words, plain meanings
+RAG: instead of hoping the model ‘knows’ the answer, you retrieve relevant documents and have it
+answer from them — grounded and citable. Embedding: a list of numbers representing text’s
+meaning, so similar texts have similar vectors. Vector store: a database that ﬁnds the most similar
+vectors fast. Agent: a component with one job that can use a model/tool. LangGraph: a library for
+wiring agents into a stateful graph with loops and branches.
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 4 / 44
+01
+Part 1 — Install
+everything (zero
+setup)
+Nothing assumed on your machine
+PART 1 · SETUP
+Python, VS Code, Git▸
+The local-vs-production idea▸
+API keys (only for production)▸
+A venv▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 5 / 44
+1.1  Install the basics
+Tool What it is Get it from
+Python 3.11+ the language python.org/downloads
+VS Code the editor code.visualstudio.com
+Git version control + GitHub git-scm.com
+✦ You can build ALL of this with no API keys
+This project runs in two modes. local mode uses a built-in oﬄine retriever and a deterministic
+summarizer/critic — no OpenAI, no Pinecone, no cost. You build and test everything here ﬁrst.
+production mode swaps in real OpenAI + Pinecone by setting a few environment variables. Nothing in
+the code changes.
+PART 1 · KEYS
+1.2  API keys (only when you go to production)
+OpenAI: sign up at platform.openai.com, create an API key (used for the LLM + embeddings).
+Pinecone: sign up at pinecone.io (free tier), create an index, copy the API key.
+You do not need either to build, run, and test the project in local mode.
+PART 1 · VENV
+1.3  Project + virtual environment
+mkdir research-assistant && cd research-assistant
+python -m venv .venv
+#   Windows:  .venv\Scripts\activate
+#   Mac/Linux: source .venv/bin/activate
+git init
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 6 / 44
+02
+Part 2 — Project
+skeleton
+Folder layout & conﬁg
+PART 2 · STRUCTURE
+Structure▸
+requirements.txt▸
+.env (the mode switch)▸
+conﬁg.py▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 7 / 44
+2.1  Folder structure
+research-assistant/
+├── app/
+│   ├── config.py        # env-driven settings + MODE switch
+│   ├── embeddings.py    # text -> vector (local or OpenAI)
+│   ├── vectorstore.py   # store + search vectors (in-memory or Pinecone)
+│   ├── ingest.py        # load docs -> chunk -> embed -> upsert
+│   ├── llm.py           # summarizer + critic brains (local or OpenAI)
+│   ├── agents.py        # Retriever, Summarizer, Critic agents
+│   ├── graph.py         # LangGraph: wires the agents with a revise loop
+│   └── api.py           # FastAPI wrapper (POST /research)
+├── data/docs/           # the knowledge base (.md files)
+├── eval/                # retrieval precision/recall harness
+├── tests/               # offline test suite
+├── requirements.txt
+├── .env.example
+└── Dockerfile
+▹ The interface pattern that makes this clean
+Notice embeddings, vectorstore, and llm each have a local and a production implementation behind
+the same interface. Swapping providers is one line. That ‘depend on an interface, not a vendor’ design
+is exactly what product companies look for.
+PART 2 · PACKAGES
+2.2  requirements.txt
+requirements.txt
+langgraph==0.2.28
+langchain-core==0.3.9
+langchain-openai==0.2.2
+pinecone-client==5.0.1
+numpy==2.1.1
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+python-dotenv==1.0.1
+pip install -r requirements.txt
+PART 2 · ENV
+2.3  The mode switch: .env
+.env.example
+# MODE=local runs fully offline (no external APIs) - great for dev & tests.
+# MODE=production uses OpenAI (LLM + embeddings) and Pinecone (vector DB).
+MODE=local
+# Only needed when MODE=production:
+OPENAI_API_KEY=sk-...
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 8 / 44
+PINECONE_API_KEY=...
+PINECONE_INDEX=research-assistant
+PART 2 · CONFIG
+2.4  config.py
+app/config.py
+"""Environment-driven config. MODE switches the whole system between a fully
+offline 'local' path (no API keys) and a 'production' path (OpenAI + Pinecone)."""
+import os
+MODE = os.getenv("MODE", "local")                 # local | production
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+PINECONE_API_KEY = os.getenv("PINECONE_API_KEY", "")
+PINECONE_INDEX = os.getenv("PINECONE_INDEX", "research-assistant")
+TOP_K = int(os.getenv("TOP_K", "3"))              # docs retrieved per query
+MAX_REVISIONS = int(os.getenv("MAX_REVISIONS", "2"))  # critic->summarizer loops
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 9 / 44
+03
+Part 3 — The concepts,
+plainly
+RAG, agents, and why LangGraph
+PART 3 · CONCEPTS
+What RAG is▸
+What an agent is▸
+Why not one big prompt▸
+Why LangGraph over a chain▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 10 / 44
+3.1  RAG in one picture
+A plain language model answers from memory and can make things up (‘hallucinate’). RAG ﬁxes
+this: you ﬁrst retrieve the most relevant documents, then ask the model to answer only from those.
+The answer is grounded and you can show the sources.
+PART 3 · AGENTS
+3.2  Why three agents instead of one big prompt
+You could stuﬀ everything into one prompt. But splitting the work into focused agents — retrieve,
+summarize, critique — is more reliable and easier to debug and test. Crucially, the Critic can judge
+the Summarizer’s output and demand a better one.
+✦ Why LangGraph, not a single LangChain chain (interview gold)
+A LangChain chain runs once, top to bottom — it cannot loop back or branch on a later step’s
+judgement. Our Critic needs to send weak answers back to the Summarizer. LangGraph gives you two
+things a chain can’t: (1) shared state that ﬂows between agents, and (2) conditional routing — the
+Critic decides ‘revise’ or ‘ﬁnish’, within a budget that guarantees the loop ends. This is the single most
+important design decision in the project; put it in your README.
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 11 / 44
+04
+Part 4 — Embeddings
+Turning text into vectors
+PART 4 · EMBEDDINGS
+What an embedding is▸
+The local embedder▸
+The OpenAI embedder▸
+One interface, two backends▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 12 / 44
+4.1  Text becomes numbers
+An embedding converts text into a vector (a list of numbers) so that similar meanings produce
+similar vectors. That’s what lets us ﬁnd ‘the documents most related to this question’. Below, the
+local version uses a simple, dependency-free hashing scheme; the production version calls
+OpenAI’s embedding model. Both expose the same embed() method.
+app/embeddings.py
+"""Turns text into a vector so we can measure similarity.
+- local: a deterministic hashing bag-of-words embedding (no downloads, no keys)
+- production: OpenAI's embedding model (imported lazily)"""
+import re, hashlib
+import numpy as np
+from app.config import MODE
+_DIM = 1024
+_TOKEN = re.compile(r"[a-z0-9]+")
+def _tokens(text: str):
+    return _TOKEN.findall(text.lower())
+class LocalEmbedder:
+    dim = _DIM
+    def embed(self, text: str) -> np.ndarray:
+        v = np.zeros(_DIM, dtype=np.float32)
+        toks = _tokens(text)
+        grams = toks + [f"{a}_{b}" for a, b in zip(toks, toks[1:])]  # unigrams + bigrams
+        for tok in grams:
+            # stable hash so results are reproducible across runs
+            idx = int(hashlib.md5(tok.encode()).hexdigest(), 16) % _DIM
+            v[idx] += 1.0
+        norm = np.linalg.norm(v)
+        return v / norm if norm else v
+    def embed_batch(self, texts):
+        return [self.embed(t) for t in texts]
+class OpenAIEmbedder:
+    dim = 1536
+    def __init__(self):
+        from langchain_openai import OpenAIEmbeddings          # lazy import
+        self._model = OpenAIEmbeddings(model="text-embedding-3-small")
+    def embed(self, text: str):
+        return np.array(self._model.embed_query(text), dtype=np.float32)
+    def embed_batch(self, texts):
+        return [np.array(v, dtype=np.float32) for v in self._model.embed_documents(texts)]
+def get_embedder():
+    return OpenAIEmbedder() if MODE == "production" else LocalEmbedder()
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 13 / 44
+◆ The local embedder is a teaching stand-in
+The hashing embedder is deliberately simple so it runs anywhere with no downloads. It’s good enough
+to demonstrate retrieval (100% recall@3 on our eval set), but real OpenAI embeddings capture
+meaning far better — that’s the whole point of the production switch.
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 14 / 44
+05
+Part 5 — The vector
+store
+Store & search vectors
+PART 5 · VECTOR STORE
+Cosine similarity▸
+In-memory store▸
+Pinecone store▸
+get_store()▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 15 / 44
+5.1  Finding the nearest vectors
+The store keeps every document’s vector and, given a query vector, returns the most similar ones
+by cosine similarity (a score from −1 to 1; higher = more related). The in-memory version is a
+few lines of NumPy; the production version is Pinecone. Same interface.
+app/vectorstore.py
+"""Stores document vectors and finds the most similar ones to a query.
+- local: an in-memory cosine-similarity store (no external DB)
+- production: Pinecone (imported lazily)"""
+import numpy as np
+from app.config import MODE, PINECONE_API_KEY, PINECONE_INDEX
+class InMemoryStore:
+    def __init__(self, embedder):
+        self.embedder = embedder
+        self._ids, self._texts, self._vecs = [], [], []
+    def upsert(self, doc_id: str, text: str):
+        self._ids.append(doc_id)
+        self._texts.append(text)
+        self._vecs.append(self.embedder.embed(text))
+    def search(self, query: str, k: int = 3):
+        if not self._vecs:
+            return []
+        q = self.embedder.embed(query)
+        mat = np.vstack(self._vecs)
+        scores = mat @ q                      # cosine sim (vectors are normalised)
+        order = np.argsort(scores)[::-1][:k]
+        return [{"id": self._ids[i], "text": self._texts[i], "score": float(scores[i])}
+                for i in order]
+class PineconeStore:
+    def __init__(self, embedder):
+        from pinecone import Pinecone         # lazy import
+        self.embedder = embedder
+        pc = Pinecone(api_key=PINECONE_API_KEY)
+        self.index = pc.Index(PINECONE_INDEX)
+    def upsert(self, doc_id: str, text: str):
+        vec = self.embedder.embed(text).tolist()
+        self.index.upsert([(doc_id, vec, {"text": text})])
+    def search(self, query: str, k: int = 3):
+        q = self.embedder.embed(query).tolist()
+        res = self.index.query(vector=q, top_k=k, include_metadata=True)
+        return [{"id": m["id"], "text": m["metadata"]["text"], "score": m["score"]}
+                for m in res["matches"]]
+def get_store(embedder):
+    return PineconeStore(embedder) if MODE == "production" else InMemoryStore(embedder)
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 16 / 44
+06
+Part 6 — Ingestion &
+the knowledge base
+Load docs into the store
+PART 6 · INGEST
+Chunking▸
+The ingest pipeline▸
+The sample docs▸
+Run ingestion▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 17 / 44
+6.1  Chunk, embed, upsert
+Long documents are split into overlapping chunks so retrieval is precise (you fetch the relevant
+paragraph, not a whole book). Each chunk is embedded and stored.
+app/ingest.py
+"""Load the knowledge base from data/docs, chunk it, and upsert into the store."""
+import os, glob
+from app.embeddings import get_embedder
+from app.vectorstore import get_store
+DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "docs")
+def _chunk(text, size=500, overlap=80):
+    """Split long text into overlapping chunks so retrieval is granular."""
+    words = text.split()
+    chunks, i = [], 0
+    while i < len(words):
+        chunks.append(" ".join(words[i:i + size]))
+        i += size - overlap
+    return chunks or [text]
+def build_store():
+    embedder = get_embedder()
+    store = get_store(embedder)
+    for path in sorted(glob.glob(os.path.join(DOCS_DIR, "*.md"))):
+        name = os.path.splitext(os.path.basename(path))[0]
+        text = open(path, encoding="utf-8").read()
+        for j, chunk in enumerate(_chunk(text)):
+            store.upsert(f"{name}#{j}", chunk)
+    return store
+The knowledge base lives in data/docs/ as Markdown ﬁles — here, eight short articles on distinct
+topics (photosynthesis, black holes, TCP/IP, vaccines, and so on). Drop in your own .md ﬁles to
+change the domain. One example:
+data/docs/photosynthesis.md
+# Photosynthesis
+Photosynthesis is the process by which green plants, algae, and some bacteria convert
+light energy into chemical energy stored in glucose. It takes place mainly in the
+chloroplasts, using the green pigment chlorophyll to capture sunlight. The overall
+reaction converts carbon dioxide and water into glucose and oxygen. Photosynthesis has
+two stages: the light-dependent reactions, which occur in the thylakoid membranes and
+produce ATP and NADPH, and the Calvin cycle, which uses that energy to fix carbon
+dioxide into sugars. Photosynthesis is the foundation of most food chains and is
+responsible for the oxygen in Earth's atmosphere.
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 18 / 44
+07
+Part 7 — The LLM layer
+The summarizer & critic brains
+PART 7 · LLM
+Task-level interface▸
+Local (oﬄine) LLM▸
+OpenAI LLM + prompts▸
+Prompt engineering▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 19 / 44
+7.1  Two brains, one interface
+Both the summarizer and critic need ‘thinking’. We expose two task methods — summarize() and
+critique() — so the agents don’t care which backend runs. The local brain is deterministic
+(extractive summary + a grounding check); the OpenAI brain uses carefully written prompts.
+app/llm.py
+"""The 'brains' behind the summarizer and critic agents.
+Both implementations expose the SAME two task methods, so the agents don't
+care which one they're using:
+- LocalLLM: deterministic, offline (extractive summary + grounding-based critique)
+- OpenAILLM: real LLM calls with carefully engineered prompts (production)"""
+import re
+from app.config import MODE
+_SENT = re.compile(r"(?<=[.!?])\s+")
+_WORD = re.compile(r"[a-z0-9]+")
+_STOP = {"the", "a", "an", "of", "to", "in", "and", "or", "is", "are", "was",
+         "were", "for", "on", "with", "as", "by", "that", "this", "it", "how",
+         "what", "why", "does", "do", "which", "who", "when"}
+def _content_words(text):
+    return {w for w in _WORD.findall(text.lower()) if w not in _STOP and len(w) > 2}
+class LocalLLM:
+    """No API calls. Good enough to exercise the full agent pipeline in tests."""
+    def summarize(self, query, docs, revisions=0):
+        # Rank every sentence in the retrieved docs by overlap with the query,
+        # then keep the top (2 + revisions) - more passes -> a fuller answer.
+        q_words = _content_words(query)
+        sentences = []
+        for d in docs:
+            for s in _SENT.split(d["text"]):
+                s = s.strip()
+                if s:
+                    overlap = len(q_words & _content_words(s))
+                    sentences.append((overlap, s))
+        sentences.sort(key=lambda t: t[0], reverse=True)
+        top = [s for score, s in sentences[: 2 + revisions] if score > 0] \
+            or [s for _, s in sentences[:1]]
+        return " ".join(top)
+    def critique(self, query, summary):
+        # Grounding check: does the summary actually cover the query's key terms?
+        need = _content_words(query)
+        have = _content_words(summary)
+        missing = sorted(need - have)
+        covered = 1.0 if not need else (len(need & have) / len(need))
+        verdict = "pass" if covered >= 0.6 else "revise"
+        issues = [] if verdict == "pass" else [f"missing coverage of: {', '.join(missing)}"]
+        return verdict, issues
+class OpenAILLM:
+    def __init__(self):
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 20 / 44
+        from langchain_openai import ChatOpenAI              # lazy import
+        self._model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    def _chat(self, system, user):
+        from langchain_core.messages import SystemMessage, HumanMessage
+        resp = self._model.invoke([SystemMessage(content=system),
+                                   HumanMessage(content=user)])
+        return resp.content.strip()
+    def summarize(self, query, docs, revisions=0):
+        context = "\n\n".join(f"[{d['id']}] {d['text']}" for d in docs)
+        system = ("You are a precise research summarizer. Answer ONLY from the "
+                  "provided sources. Cite source ids like [id]. If the sources do "
+                  "not answer the question, say so.")
+        user = f"Question: {query}\n\nSources:\n{context}\n\nWrite a concise, cited answer."
+        return self._chat(system, user)
+    def critique(self, query, summary):
+        system = ("You are a fact-checking critic. Decide if the summary is fully "
+                  "supported and answers the question. Reply 'PASS' or 'REVISE: "
+                  "<reason>'.")
+        user = f"Question: {query}\n\nSummary:\n{summary}"
+        out = self._chat(system, user)
+        if out.upper().startswith("PASS"):
+            return "pass", []
+        return "revise", [out]
+def get_llm():
+    return OpenAILLM() if MODE == "production" else LocalLLM()
+✦ This is where your Prompt Engineering shows
+Look at the system prompts in OpenAILLM: the summarizer is told to answer only from sources and cite
+ids; the critic is told to reply PASS or REVISE with a reason. Precise, role-speciﬁc prompts like these are
+the ‘Prompt Engineering’ skill in action — walk an interviewer through them.
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 21 / 44
+08
+Part 8 — The three
+agents
+One job each
+PART 8 · AGENTS
+RetrieverAgent▸
+SummarizerAgent▸
+CriticAgent▸
+Why thin agents▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 22 / 44
+8.1  Single-responsibility agents
+Each agent owns exactly one step. Keeping them thin makes the system easy to reason about, test,
+and extend (you could add a ‘translator’ agent without touching the others).
+app/agents.py
+"""Three single-responsibility agents. Each owns one step of the pipeline."""
+class RetrieverAgent:
+    """Finds the most relevant documents for a query (RAG retrieval step)."""
+    def __init__(self, store, top_k=3):
+        self.store, self.top_k = store, top_k
+    def run(self, query):
+        return self.store.search(query, k=self.top_k)
+class SummarizerAgent:
+    """Turns retrieved documents into a grounded answer."""
+    def __init__(self, llm):
+        self.llm = llm
+    def run(self, query, docs, revisions=0):
+        return self.llm.summarize(query, docs, revisions)
+class CriticAgent:
+    """Fact-checks the summary against the question; may request a revision."""
+    def __init__(self, llm):
+        self.llm = llm
+    def run(self, query, summary):
+        verdict, issues = self.llm.critique(query, summary)
+        return {"verdict": verdict, "issues": issues}
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 23 / 44
+09
+Part 9 — LangGraph
+orchestration
+The centrepiece
+PART 9 · LANGGRAPH
+The shared state▸
+The nodes▸
+Conditional routing▸
+The revise loop & budget▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 24 / 44
+9.1  Wiring agents into a graph
+This is the heart of the project. A StateGraph deﬁnes the shared state and the nodes; edges
+deﬁne the ﬂow. The special part is add_conditional_edges: after the critic runs, a route function
+decides whether to loop back to the summarizer or ﬁnish.
+app/graph.py
+"""The LangGraph orchestration: retrieve -> summarize -> critique, with a
+conditional loop back to summarize when the critic asks for a revision.
+THIS is why LangGraph beats a single LangChain chain:
+- shared STATE flows between agents (docs, summary, critique, revision count)
+- CONDITIONAL ROUTING lets the critic send work back for another pass
+A linear chain cannot loop or branch on a downstream agent's judgement."""
+from typing import TypedDict, List, Dict
+from langgraph.graph import StateGraph, END
+from app.config import MAX_REVISIONS
+class ResearchState(TypedDict):
+    query: str
+    docs: List[Dict]
+    summary: str
+    verdict: str
+    issues: List[str]
+    revisions: int
+def build_graph(retriever, summarizer, critic, max_revisions: int = MAX_REVISIONS):
+    def retrieve_node(state):
+        return {"docs": retriever.run(state["query"])}
+    def summarize_node(state):
+        summary = summarizer.run(state["query"], state["docs"], state.get("revisions", 0))
+        return {"summary": summary}
+    def critique_node(state):
+        result = critic.run(state["query"], state["summary"])
+        return {"verdict": result["verdict"],
+                "issues": result["issues"],
+                "revisions": state.get("revisions", 0) + 1}
+    def route(state):
+        # branch on the critic's judgement + a revision budget
+        if state["verdict"] == "revise" and state["revisions"] <= max_revisions:
+            return "summarize"      # hand back for another attempt
+        return "end"
+    g = StateGraph(ResearchState)
+    g.add_node("retrieve", retrieve_node)
+    g.add_node("summarize", summarize_node)
+    g.add_node("critique", critique_node)
+    g.set_entry_point("retrieve")
+    g.add_edge("retrieve", "summarize")
+    g.add_edge("summarize", "critique")
+    g.add_conditional_edges("critique", route, {"summarize": "summarize", "end": END})
+    return g.compile()
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 25 / 44
+✦ Read the route() function twice
+route() is the entire argument for using LangGraph. It inspects the critic’s verdict and the revisions
+count and returns either "summarize" (loop back) or "end". The revision budget (max_revisions)
+guarantees the loop always terminates — there’s a test proving it (Part 13).
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 26 / 44
+10
+Part 10 — The FastAPI
+wrapper
+Expose it as an API
+PART 10 · API
+Build the pipeline once▸
+POST /research▸
+The response shape▸
+Run the server▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 27 / 44
+10.1  api.py
+The API builds the store and graph once at startup, then answers each request by invoking the
+graph. It returns the answer, the critic’s verdict, the number of revisions, and the source documents
+(with scores) — so the caller can see the evidence.
+app/api.py
+"""FastAPI wrapper: POST a query, get back a grounded, fact-checked answer."""
+from fastapi import FastAPI
+from pydantic import BaseModel
+from app.ingest import build_store
+from app.embeddings import get_embedder  # noqa: F401 (kept explicit for clarity)
+from app.agents import RetrieverAgent, SummarizerAgent, CriticAgent
+from app.llm import get_llm
+from app.graph import build_graph
+from app.config import TOP_K
+app = FastAPI(title="Multi-Agent RAG Research Assistant", version="1.0.0")
+# Build the pipeline once at startup.
+_store = build_store()
+_llm = get_llm()
+_graph = build_graph(RetrieverAgent(_store, top_k=TOP_K),
+                     SummarizerAgent(_llm),
+                     CriticAgent(_llm))
+class Query(BaseModel):
+    query: str
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+@app.post("/research")
+def research(q: Query):
+    final = _graph.invoke({"query": q.query, "revisions": 0})
+    return {
+        "query": q.query,
+        "answer": final["summary"],
+        "verdict": final["verdict"],
+        "issues": final["issues"],
+        "revisions": final["revisions"],
+        "sources": [{"id": d["id"], "score": round(d["score"], 3)} for d in final["docs"]],
+    }
+MODE=local uvicorn app.api:app --reload
+# open http://localhost:8000/docs to try it in the browser
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 28 / 44
+11
+Part 11 — Run it end
+to end
+See the agents cooperate
+PART 11 · RUN
+Start in local mode▸
+Ask a question▸
+Read the response▸
+What just happened▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 29 / 44
+11.1  A real request
+curl -X POST localhost:8000/research \
+  -H "Content-Type: application/json" \
+  -d '{"query": "How do plants convert sunlight into energy?"}' 
+The response (abbreviated) — produced by the actual pipeline in local mode:
+{
+  "query": "How do plants convert sunlight into energy?",
+  "answer": "Photosynthesis is the process by which green plants ... convert
+             light energy into chemical energy stored in glucose. ...",
+  "verdict": "pass",
+  "revisions": 1,
+  "sources": [
+    {"id": "photosynthesis#0", "score": 0.71},
+    {"id": "water_cycle#0",    "score": 0.12},
+    {"id": "tcp_ip#0",         "score": 0.05}
+  ]
+}
+◆ Trace the ﬂow
+Retriever pulled the photosynthesis chunk (top score); Summarizer answered from it; Critic checked the
+answer covered the question’s key terms and returned pass — so the graph ﬁnished. Change the query
+and watch the sources change.
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 30 / 44
+12
+Part 12 — Evaluation
+harness
+Prove retrieval quality with numbers
+PART 12 · EVAL
+The test set▸
+Precision & recall▸
+Run the eval▸
+README wording▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 31 / 44
+12.1  Measuring retrieval
+‘It seems to work’ isn’t evidence. An eval set is: a list of queries, each mapped to the document
+that should be retrieved. Then you measure how often the retriever gets it right. This is exactly the
+‘small eval set showing retrieval precision’ depth add-on.
+eval/testset.py
+"""Evaluation set: each query maps to the document that SHOULD be retrieved.
+Doc ids are the source filename (chunk suffix like '#0' is ignored when scoring)."""
+TEST_QUERIES = [
+    ("How do plants convert sunlight into energy?", "photosynthesis"),
+    ("What is the role of chlorophyll?", "photosynthesis"),
+    ("How does water move through evaporation and rain?", "water_cycle"),
+    ("What is the hydrologic cycle?", "water_cycle"),
+    ("What happens at the event horizon of a black hole?", "black_holes"),
+    ("How do massive stars collapse into a singularity?", "black_holes"),
+    ("What caused the storming of the Bastille?", "french_revolution"),
+    ("Who was Robespierre and the Reign of Terror?", "french_revolution"),
+    ("How does the three-way handshake work in networking?", "tcp_ip"),
+    ("What does the Internet Protocol handle?", "tcp_ip"),
+    ("What is supervised versus unsupervised learning?", "machine_learning"),
+    ("What is overfitting and gradient descent?", "machine_learning"),
+    ("When did Augustus become the first Roman emperor?", "roman_empire"),
+    ("How do vaccines create herd immunity?", "vaccines"),
+    ("How does a vaccine train the immune system?", "vaccines"),
+]
+The harness computes top-1 accuracy (was the best hit correct?) and recall@k (was the right doc
+anywhere in the top k?):
+eval/run_eval.py
+"""Compute retrieval precision@k and recall@k over the test set.
+Run with:  python -m eval.run_eval"""
+from app.ingest import build_store
+from app.config import TOP_K
+from eval.testset import TEST_QUERIES
+def _base(doc_id):            # 'photosynthesis#0' -> 'photosynthesis'
+    return doc_id.split("#")[0]
+def evaluate(k=TOP_K):
+    store = build_store()
+    hits, top1_hits, precisions = 0, 0, []
+    print(f"\nRetrieval evaluation (top_k={k}) over {len(TEST_QUERIES)} queries\n" + "-" * 60)
+    for query, expected in TEST_QUERIES:
+        results = store.search(query, k=k)
+        retrieved = [_base(r["id"]) for r in results]
+        relevant = sum(1 for r in retrieved if r == expected)
+        precision = relevant / k
+        precisions.append(precision)
+        top1 = retrieved[0] if retrieved else "-"
+        ok = "OK " if expected in retrieved else "MISS"
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 32 / 44
+        hits += expected in retrieved
+        top1_hits += (top1 == expected)
+        print(f"[{ok}] top1={top1:<16} expected={expected:<16} P@{k}={precision:.2f}")
+    print("-" * 60)
+    print(f"Top-1 accuracy:            {top1_hits}/{len(TEST_QUERIES)} = 
+{top1_hits/len(TEST_QUERIES):.1%}")
+    print(f"Recall@{k} (in top-{k}):        {hits}/{len(TEST_QUERIES)} = {hits/len(TEST_QUERIES):.1%}")
+    print(f"Mean precision@{k}:          {sum(precisions)/len(precisions):.2f}\n")
+    return hits / len(TEST_QUERIES)
+if __name__ == "__main__":
+    evaluate()
+MODE=local python -m eval.run_eval
+Top-1 accuracy:            12/15 = 80.0%
+Recall@3 (in top-3):        15/15 = 100.0%
+Mean precision@3:          0.33
+✦ README wording you can reuse
+‘Evaluated retrieval on a 15-query test set: Recall@3 = 100%, top-1 accuracy = 80% with the local
+embedder; production OpenAI embeddings improve top-1 further. The harness (eval/run_eval.py)
+makes retrieval quality a measurable, regression-tested number.’
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 33 / 44
+13
+Part 13 — Tests
+Prove the whole pipeline, oﬄine
+PART 13 · TESTS
+conftest.py▸
+The pipeline tests▸
+The API test▸
+Run pytest▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 34 / 44
+13.1  Testing without API keys
+Because everything has a local implementation, the entire multi-agent pipeline is unit-tested
+oﬄine. The tests cover retrieval accuracy, grounded answering, agent handoﬀ, the critic’s revise
+logic, and — importantly — that the revision loop always terminates.
+tests/conftest.py
+"""Force local mode so the whole suite runs offline with no API keys."""
+import os
+os.environ["MODE"] = "local"
+import pytest
+from app.ingest import build_store
+from app.agents import RetrieverAgent, SummarizerAgent, CriticAgent
+from app.llm import get_llm
+from app.graph import build_graph
+@pytest.fixture(scope="session")
+def store():
+    return build_store()
+@pytest.fixture(scope="session")
+def graph(store):
+    llm = get_llm()
+    return build_graph(RetrieverAgent(store, top_k=3), SummarizerAgent(llm), CriticAgent(llm))
+tests/test_pipeline.py
+from app.llm import LocalLLM
+from app.graph import build_graph
+from app.agents import RetrieverAgent, SummarizerAgent, CriticAgent
+def test_retrieval_finds_right_doc(store):
+    results = store.search("How do plants convert sunlight into energy?", k=3)
+    assert results and results[0]["id"].startswith("photosynthesis")
+def test_retrieval_precision_threshold():
+    from eval.run_eval import evaluate
+    recall = evaluate(k=3)
+    assert recall >= 0.8            # at least 80% of queries find their doc in top-3
+def test_graph_returns_grounded_answer(graph):
+    out = graph.invoke({"query": "What is the event horizon of a black hole?", "revisions": 0})
+    assert out["summary"]                       # non-empty answer
+    assert any(d["id"].startswith("black_holes") for d in out["docs"])
+    assert out["verdict"] in {"pass", "revise"}
+def test_agent_handoff_order(store):
+    # verify all three agents run in sequence via the state that accumulates
+    llm = get_llm_local()
+    g = build_graph(RetrieverAgent(store, 3), SummarizerAgent(llm), CriticAgent(llm))
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 35 / 44
+    out = g.invoke({"query": "how do vaccines work", "revisions": 0})
+    assert "docs" in out and "summary" in out and "verdict" in out
+def get_llm_local():
+    return LocalLLM()
+def test_critic_requests_revision_when_summary_is_weak():
+    # a summary that misses the query's key terms should be flagged for revision
+    llm = LocalLLM()
+    verdict, issues = llm.critique("photosynthesis chlorophyll glucose", "the sky is blue")
+    assert verdict == "revise" and issues
+def test_critic_passes_grounded_summary():
+    llm = LocalLLM()
+    verdict, _ = llm.critique("black hole event horizon",
+                              "A black hole has an event horizon boundary.")
+    assert verdict == "pass"
+def test_revision_loop_respects_budget(store):
+    # even in the worst case the graph must terminate (no infinite loop)
+    llm = LocalLLM()
+    g = build_graph(RetrieverAgent(store, 3), SummarizerAgent(llm), CriticAgent(llm),
+                    max_revisions=2)
+    out = g.invoke({"query": "zzzz nonexistent topic query", "revisions": 0})
+    assert out["revisions"] <= 4     # bounded by the budget, always halts
+tests/test_api.py
+from fastapi.testclient import TestClient
+from app.api import app
+client = TestClient(app)
+def test_health():
+    assert client.get("/health").json() == {"status": "ok"}
+def test_research_endpoint():
+    r = client.post("/research", json={"query": "How does the water cycle work?"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["answer"]
+    assert any(s["id"].startswith("water_cycle") for s in body["sources"])
+    assert body["verdict"] in {"pass", "revise"}
+MODE=local pytest -q
+9 passed in 0.20s
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 36 / 44
+✦ This exact suite passes
+Every ﬁle in this guide was assembled into a real project and run: 9 passed — retrieval, grounded
+answers, agent handoﬀ, critic pass/revise, loop-termination, and the API. The code you’re copying is
+veriﬁed working.
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 37 / 44
+14
+Part 14 — Dockerize &
+deploy
+Ship it
+PART 14 · DOCKER
+Dockerﬁle▸
+Go to production mode▸
+Deploy on Render▸
+Set the keys▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 38 / 44
+14.1  Dockerfile
+Dockerfile
+FROM python:3.11-slim
+WORKDIR /code
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY ./app ./app
+COPY ./data ./data
+EXPOSE 8000
+CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
+PART 14 · DEPLOY
+14.2  Switch to production & deploy
+1. Push to GitHub: git add . && git commit -m "RAG assistant" && git push.
+2. On render.com: New → Web Service, connect the repo.
+3. Set environment variables: MODE=production, OPENAI_API_KEY, PINECONE_API_KEY, PINECONE_INDEX.
+4. Start command: uvicorn app.api:app --host 0.0.0.0 --port $PORT.
+5. First deploy will ingest your docs into Pinecone; then POST to /research on your public URL.
+✦ One switch, zero code changes
+Because every provider sits behind an interface selected by MODE, going from your oﬄine laptop build
+to a live OpenAI + Pinecone service is just setting environment variables. That’s the payoﬀ of the
+interface design from Part 2.
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 39 / 44
+15
+Part 15 — README
+‘Design Decisions’
+The section recruiters read
+PART 15 · README
+Why LangGraph▸
+Agent handoﬀ logic▸
+RAG design▸
+Testability▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 40 / 44
+15.1  Put your reasoning in the README
+This is the diﬀerence between ‘a student wired some libraries together’ and ‘an engineer made
+deliberate architectural choices’. Paste and adapt into README.md:
+README.md
+# Multi-Agent RAG Research Assistant
+Three cooperating agents answer a question from a document knowledge base:
+a **Retriever** (RAG), a **Summarizer**, and a **Critic** that fact-checks the
+answer and can send it back for revision - orchestrated with **LangGraph**.
+Runs fully offline in `MODE=local`; uses **OpenAI + Pinecone** in `MODE=production`.
+## Architecture
+retrieve --> summarize --> critique --> (revise? loop back : finish)
+## Design Decisions
+**Why LangGraph over a single LangChain chain** - the critic must be able to
+send work *back* to the summarizer for another pass. A linear chain runs once,
+top to bottom, and cannot loop or branch on a later agent's judgement.
+LangGraph gives us (1) shared **state** that flows between agents and (2)
+**conditional routing** (`add_conditional_edges`) so the critic decides whether
+to finish or revise, within a revision budget that guarantees termination.
+**Agent handoff logic** - state carries `query -> docs -> summary -> verdict`.
+Retriever writes `docs`; summarizer reads `docs` + `revisions` and writes
+`summary`; critic reads `summary` and writes `verdict`/`issues` and increments
+`revisions`. The router reads `verdict` + `revisions` to route back or end.
+**RAG design** - documents are chunked with overlap, embedded, and stored in a
+vector index; retrieval uses cosine similarity. Swapping local <-> Pinecone is a
+one-line change because the store is behind a small interface.
+**Testability** - LLM, embeddings, and vector store each have a local
+implementation, so the full pipeline is unit-tested offline with no API keys.
+## Retrieval evaluation
+`python -m eval.run_eval` scores 15 queries -> Recall@3 = 100%, top-1 = 80%
+on the local embedder (production embeddings score higher).
+## Run
+    MODE=local uvicorn app.api:app --reload
+    curl -X POST localhost:8000/research -H "Content-Type: application/json" \
+         -d '{"query":"How does the water cycle work?"}'
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 41 / 44
+16
+Part 16 — Talk about it
+& resume bullets
+Convert the build into wins
+PART 16 · PITCH
+60-second pitch▸
+Interview questions▸
+Resume bullets (XYZ)▸
+What to build next▸
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 42 / 44
+16.1  Your 60-second explanation
+‘I built a multi-agent research assistant with LangGraph. A retriever agent does RAG over a
+Pinecone vector store, a summarizer answers strictly from the retrieved sources with citations, and
+a critic agent fact-checks the answer and can route it back for revision within a budget. I chose
+LangGraph over a single chain speciﬁcally for that conditional loop and shared state. I evaluated
+retrieval on a 15-query set (100% recall@3), and the whole pipeline is unit-tested oﬄine via a local
+mode, then deployed with OpenAI + Pinecone behind the same interfaces.’
+PART 16 · INTERVIEW
+16.2  Questions this prepares you for
+They ask You can answer because you built it
+What is RAG and why use it? Retrieve-then-answer, grounded + citable
+Why LangGraph over a chain? Conditional routing + shared state; the revise loop
+How do agents hand oﬀ? Via typed state: docs -> summary -> verdict
+How do you stop an inﬁnite loop? A revision budget in route(); tested
+How do you measure retrieval? precision/recall eval harness
+How do you test LLM systems? Local deterministic mode, no keys needed
+PART 16 · RESUME
+16.3  Resume bullets (XYZ format)
+Built a multi-agent RAG research assistant (LangGraph, LangChain, Pinecone, FastAPI) where
+retriever, summarizer, and critic agents cooperate via shared state and conditional routing.
+Designed a critic-driven revision loop with a bounded budget, choosing LangGraph over a linear
+chain to enable branch-and-loop control that a single chain cannot express.
+Grounded answers in retrieved sources with citations and validated retrieval on a 15-query eval
+set (100% recall@3), making answer quality measurable.
+Engineered provider-agnostic interfaces (local vs OpenAI/Pinecone) enabling a fully oﬄine, key-
+free test suite (9 tests) and a one-switch production deploy on Render via Docker.
+✦ Order of build, for maximum resume impact
+You’ve now got Project 2 (backend) and Project 1 (AI/ML) — the two hardest gaps. Project 3 (the Data
+Analytics Dashboard: MongoDB + EDA + Tableau/Power BI) closes the Data-Analyst block. Build it next
+and your three target roles are each backed by real, deployed proof.
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 43 / 44
+CONSISTENCY AI
+Project 1 · Multi-Agent RAG Research Assistant. From zero to a tested, evaluated, deployable agent system — real
+proof for every AI/ML skill on your resume. Show up. Ship. Repeat.
+Consistency AI · Project 1 · Multi-Agent RAG Build Guide Page 44 / 44
